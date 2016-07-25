@@ -7,12 +7,14 @@
 #include "chrono"
 #include "thread"
 #include <cmath>
+#include <stdio.h>
 #include "opencv2/imgcodecs.hpp"
 #include "opencv2/highgui.hpp"
 #include "opencv2/imgproc.hpp"
 
 using namespace cv;
 using namespace std;
+
 
 
 //The destructor erases logs from memory
@@ -69,8 +71,7 @@ int maxSide(std::vector<cv::Point> approx){
 
 
 /**
- * What is this?
- * I know we use it for turn task
+ * This defines the task we draw upon
  *
  */
 PathTask::PathTask(Model* cameraModel, TurnTask *turnTask, SpeedTask *speedTask) {
@@ -78,8 +79,9 @@ PathTask::PathTask(Model* cameraModel, TurnTask *turnTask, SpeedTask *speedTask)
     this->turnTask = turnTask;
     this->speedTask = speedTask;
     moving = false;
-    alignThreshold = 75;
+    alignThreshold = 75; //why 75
     forwardSpeed = 20;
+
 }
 
 
@@ -120,27 +122,41 @@ void PathTask::rotate(float angle) {
 }
 
 /**
- * Do we use this?
- * James' function
+ *
+ * James' function to move to a select place
  *
  */
 void PathTask::moveTo(cv::Point2f pos) {
-    //TODO: Log this with useful debugs
-    // Pretty much in line
-    if (std::abs(pos.x - imgWidth / 2) < alignThreshold) {
+    //This assumes that (0,0) is in top left
+    float imgHeightF = static_cast<float>(imgHeight);
+    float imgWidthF = static_cast<float>(imgWidth);
+    printf("CENTRE: %f %f\n", imgHeightF, imgWidthF);
+    printf("POSITION: %f %f\n", pos.y, pos.x);
+    printf("START: %f %f\n", pos.y-imgHeightF/2, pos.x-imgWidthF/2);
+    if (std::abs(pos.x - imgWidthF / 2) < alignThreshold) {
         //float distance = std::sqrt(pos.x * pos.x + pos.y * pos.y);
-        if (pos.y - imgHeight / 2 > 0) {
+        if ((pos.y - imgHeightF / 2) < 0) {
             logger->info("Moveto moving forwards");
             setSpeed(forwardSpeed);
         } else {
             logger->info("Moveto moving backwards");
             setSpeed(-forwardSpeed);
         }
-    } else {
+    }
+
+    else {
         printf("Move to: %f %f\n", pos.y, pos.x);
-        float ang = atan2(pos.y - imgHeight / 2, pos.x - imgWidth / 2) * 180 / M_PI;
+        //the proportion is y/x
+        //we use atan2 because it's more stable for small angles
+        //double proportion= (pos.y - imgHeightF/ 2)/(pos.x - imgWidthF / 2);
+        float ang = atan2(-1*(pos.y - imgHeightF/ 2),pos.x - imgWidthF / 2) * 180 / M_PI;
+
 //        float ang = 5;
-        ang *= std::abs(pos.x-imgWidth/2)/(pos.x-imgWidth/2);
+        if ((pos.y - imgHeightF/ 2)>0){
+            //if y displacement is positive, the angle you need to move is greater than 90
+            ang=ang-(ang/std::abs(ang)*M_PI);
+        }
+
         logger->info("moveto Rotating " + std::to_string(ang) + " degrees");
         rotate(ang);
         sleep(1);
@@ -198,6 +214,9 @@ void PathTask::execute() {
          Mat imgOriginal;
          logger->trace("Got image from camera");
          imgOriginal = data->getImg();
+         cv::Size s = imgOriginal.size();
+         imgWidth = s.width;
+         imgHeight = s.height;
 
          Mat imgHSV;
          Mat imgThresholded;
@@ -229,9 +248,15 @@ void PathTask::execute() {
          // Get the moments
            vector<Moments> mu(contours.size() );
            for( size_t i = 0; i < contours.size(); i++ )
-              { mu[i] = moments( contours[i], false ); }
+              { 
+               mu[i] = moments( contours[i], false ); 
+           }
 
-           //  Get the mass centers:
+           /**
+            *Find mass centre of contour
+           *
+           */
+
              vector<Point2f> mc( contours.size() );
              for( size_t i = 0; i < contours.size(); i++ )
                 { mc[i] = Point2f( static_cast<float>(mu[i].m10/mu[i].m00) , static_cast<float>(mu[i].m01/mu[i].m00) ); }
@@ -240,23 +265,49 @@ void PathTask::execute() {
             cv::circle(imgHSV, mc[0], 5, Scalar(180,105,255));
 
 
-            imshow("HSV", imgHSV);
+              imshow("HSV", imgHSV);
               imshow("bw", bw);
 
-             /**
-              *Do you see a shape
-             *
-             */
+              float imgHeightF = static_cast<float>(imgHeight);
+              float imgWidthF = static_cast<float>(imgWidth);
+
+
+              /**
+               * Is the path close enough to the origin?
+              *
+              */
+             bool closeEnough=false;
+             cv::Point origin( imgWidthF/2, imgHeightF/2);
+             if (lineLength(mc[0], origin)<50) {
+                 closeEnough=true;
+                 printf("close enough");
+             }
+
+              /**
+               *Move to the centre of the contour detected
+               * IF we are not close enough
+              *
+              */
+
+              if(!closeEnough){
+                  //if we aren't close enough
+                  //go back to the beginning of the WHILE loop to try again
+                  moveTo(mc[0]);
+                  printf("Not close enough");
+                  sleep(0.5);
+                  continue;
+              }
+
 
 
          for (int i = 0; i < contours.size(); i++){
 
-             printf("Contours size: %d\n", contours.size());
+             //printf("Contours size: %d\n", contours.size());
              // Approximate contour with accuracy proportional
              // to the contour perimeter
              cv::approxPolyDP(cv::Mat(contours[i]), approx, cv::arcLength(cv::Mat(contours[i]), true)*0.02, true);
 
-             // Skip small or non-convex objects CS is this actually working???
+             // Skip small or non-convex objects
              if (std::fabs(cv::contourArea(contours[i])) < 100 || !cv::isContourConvex(approx))
                 continue;
 
@@ -266,49 +317,14 @@ void PathTask::execute() {
              }
 
 //             imshow("imgThresholded", bw);
-
-
-             /**
-              * Are we close enough?
-             *
-             */
-            bool closeEnough=false;
-            cv::Point origin( imgWidth/2, imgHeight/2);
-            if (lineLength(mc[0], origin)<50) {
-                closeEnough=true;
-            }
-
-             /**
-              *Move to the centre of the contour detected
-              * IF we are not close enough
-             *
-             */
-
-             if (!closeEnough){
-                 //if we aren't close enough after moving
-                 //go back to the beginning of loop to try again
-                 moveTo(mc[0]);
-                 continue;
-             }
-
-
              /**
               *orient relative to the sub IF a rectangle shape has been found
              *
              */
              if (approx.size() == 4 || approx.size() == 5 || approx.size() == 6){
 
-
-                /**
-                 *orient into the center of the screen
-                 * if the path is NOT within middle 20%
-                *
-                */
                 //find distance between the contour and the centre
-//                slide(deltaX)
-
-
-
+    //                slide(deltaX)
                 /**
                  *Do math to find the angle relative to vertical of the max side
                 *
@@ -329,6 +345,11 @@ void PathTask::execute() {
                     ajusterAngle=-1*ajusterAngle;
                 }
 
+
+
+                //TODO: make sure it's evaluating 10 frames
+
+
                 logger->info("the path is "+ std::to_string(ajusterAngle)+"degrees from the reference");
                 //if(abs(ajusterAngle) < 2.5) angleThresholdMet = true; // threshold to get out of loop
                 rotate(-1*ajusterAngle);
@@ -339,12 +360,16 @@ void PathTask::execute() {
                 line(imgLines, approx[3], approx[0], Scalar(0,0,255), 2);
                 imshow("contours", imgLines);
 
-             }
+             }//if loop end
 
-         }
+             }//for loop end
+
+
          //imshow("imgThresholded", bw);
+
+
      }
 
      logger->info("EXITING");
-    return;
+     return;
 }
